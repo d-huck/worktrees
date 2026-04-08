@@ -1,7 +1,8 @@
 mod worktree;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
+use std::path::PathBuf;
 
 #[derive(Clone, ValueEnum)]
 enum Shell {
@@ -95,7 +96,16 @@ enum Commands {
         #[arg(long)]
         expire: Option<String>,
     },
-    /// Print shell integration code — source this in your shell profile
+    /// Install shell completions and the cd wrapper to standard system locations
+    ///
+    /// For zsh, writes ~/.zfunc/_work and prints what to add to ~/.zshrc.
+    /// For fish, writes to ~/.config/fish/{completions,functions}/ automatically.
+    /// For bash, writes to ~/.local/share/bash-completion/completions/work.
+    Setup {
+        /// Shell to set up
+        shell: Shell,
+    },
+    /// Print shell integration code (alternative to `setup` for manual config)
     ///
     /// Zsh:  eval "$(work init zsh)"
     /// Fish: work init fish | source
@@ -157,6 +167,7 @@ fn main() -> Result<()> {
         } => {
             worktree::prune(dry_run, verbose, expire.as_deref())?;
         }
+        Commands::Setup { shell } => setup(&shell)?,
         Commands::Init { shell } => print_init(&shell),
         Commands::Completions { shell } => print_completions(&shell),
         Commands::ListNames => {
@@ -167,11 +178,87 @@ fn main() -> Result<()> {
     Ok(())
 }
 
+// ── Setup ────────────────────────────────────────────────────────────────────
+
+fn setup(shell: &Shell) -> Result<()> {
+    match shell {
+        Shell::Zsh => setup_zsh(),
+        Shell::Fish => setup_fish(),
+        Shell::Bash => setup_bash(),
+    }
+}
+
+fn write_file(path: &PathBuf, content: &str) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("Failed to create {}", parent.display()))?;
+    }
+    std::fs::write(path, content)
+        .with_context(|| format!("Failed to write {}", path.display()))?;
+    eprintln!("Wrote {}", path.display());
+    Ok(())
+}
+
+fn home() -> PathBuf {
+    dirs::home_dir().expect("Could not determine home directory")
+}
+
+fn setup_zsh() -> Result<()> {
+    // The completion file goes in ~/.zfunc/_work, which zsh autoloads via $fpath.
+    // The file content is the function body directly (traditional zsh autoload format),
+    // so no _work(){} wrapper — the #compdef directive handles registration.
+    let completion_path = home().join(".zfunc").join("_work");
+    write_file(&completion_path, ZSH_FPATH_COMPLETION)?;
+
+    println!();
+    println!("Add the following to your ~/.zshrc (before compinit / oh-my-zsh source):");
+    println!();
+    println!("  fpath=(~/.zfunc $fpath)");
+    println!();
+    println!("And add this shell function so `work cd` can change your directory:");
+    println!();
+    println!("{}", ZSH_FUNCTION.trim_end().lines().map(|l| format!("  {l}")).collect::<Vec<_>>().join("\n"));
+    println!();
+    Ok(())
+}
+
+fn setup_fish() -> Result<()> {
+    // Fish auto-loads from these two directories — no config file changes needed.
+    let completions_path = home()
+        .join(".config/fish/completions/work.fish");
+    let function_path = home()
+        .join(".config/fish/functions/work.fish");
+
+    write_file(&completions_path, FISH_COMPLETION)?;
+    write_file(&function_path, FISH_FUNCTION)?;
+
+    println!();
+    println!("Done! Open a new fish shell and `work <TAB>` should work.");
+    println!();
+    Ok(())
+}
+
+fn setup_bash() -> Result<()> {
+    // bash-completion v2 auto-sources files from this directory.
+    let completion_path = home()
+        .join(".local/share/bash-completion/completions/work");
+    write_file(&completion_path, BASH_COMPLETION)?;
+
+    println!();
+    println!("Add this shell function to your ~/.bashrc so `work cd` can change your directory:");
+    println!();
+    println!("{}", BASH_FUNCTION.trim_end().lines().map(|l| format!("  {l}")).collect::<Vec<_>>().join("\n"));
+    println!();
+    Ok(())
+}
+
+// ── Shell init (manual / eval alternative) ───────────────────────────────────
+
 fn print_init(shell: &Shell) {
     match shell {
-        Shell::Zsh => print!("{}", ZSH_INIT),
-        Shell::Fish => print!("{}", FISH_INIT),
-        Shell::Bash => print!("{}", BASH_INIT),
+        Shell::Zsh => print!("{}", ZSH_FUNCTION),
+        Shell::Fish => print!("{}", FISH_FUNCTION),
+        Shell::Bash => print!("{}", BASH_FUNCTION),
     }
 }
 
@@ -183,14 +270,9 @@ fn print_completions(shell: &Shell) {
     }
 }
 
-// ── Shell integration ────────────────────────────────────────────────────────
-//
-// The shell function intercepts `work cd <name>` so it can change the *current*
-// shell's directory (a child process cannot do this).  All other subcommands
-// are forwarded unchanged to the `work` binary.
+// ── Shell functions (cd wrapper) ─────────────────────────────────────────────
 
-const ZSH_INIT: &str = r#"# work — git worktree manager (zsh integration)
-# Generated by: work init zsh
+const ZSH_FUNCTION: &str = r#"# work — git worktree manager (zsh function)
 work() {
     if [[ "$1" == "cd" ]]; then
         local target
@@ -200,18 +282,9 @@ work() {
         command work "$@"
     fi
 }
-
-# Tab completions — sourced inline so they stay in sync with the binary.
-# compdef is called inside the completion script; this line ensures the
-# completion system is initialised first so compdef is available.
-if (( ! $+functions[compdef] )); then
-    autoload -Uz compinit && compinit
-fi
-source <(command work completions zsh)
 "#;
 
-const BASH_INIT: &str = r#"# work — git worktree manager (bash integration)
-# Generated by: work init bash
+const BASH_FUNCTION: &str = r#"# work — git worktree manager (bash function)
 work() {
     if [[ "$1" == "cd" ]]; then
         local target
@@ -221,13 +294,10 @@ work() {
         command work "$@"
     fi
 }
-
-# Tab completions
-source <(command work completions bash)
 "#;
 
-const FISH_INIT: &str = r#"# work — git worktree manager (fish integration)
-# Generated by: work init fish
+const FISH_FUNCTION: &str = r#"# work — git worktree manager (fish function)
+# ~/.config/fish/functions/work.fish
 function work
     if test "$argv[1]" = "cd"
         set target (command work cd $argv[2..])
@@ -236,15 +306,105 @@ function work
         command work $argv
     end
 end
-
-# Tab completions
-command work completions fish | source
 "#;
 
-// ── Completion scripts ───────────────────────────────────────────────────────
+// ── Completion scripts ────────────────────────────────────────────────────────
 //
-// `work list-names` is called at completion time to enumerate worktree names
-// for the current repository dynamically.
+// ZSH_FPATH_COMPLETION  — written to ~/.zfunc/_work by `work setup zsh`.
+//   Zsh autoloads this as the body of the _work function (traditional format).
+//   #compdef registers it; no explicit compdef call or _work(){} wrapper needed.
+//
+// ZSH_COMPLETION        — printed by `work completions zsh` for manual sourcing.
+//   Wraps the logic in _work(){} and calls compdef explicitly.
+//
+// `work list-names` is called at completion time for dynamic worktree names.
+
+const ZSH_FPATH_COMPLETION: &str = r#"#compdef work
+
+_work_worktree_names() {
+    local names
+    names=(${(f)"$(command work list-names 2>/dev/null)"})
+    _describe 'worktree' names
+}
+
+local state
+
+_arguments -C \
+    '(-h --help)'{-h,--help}'[Show help]' \
+    '(-V --version)'{-V,--version}'[Show version]' \
+    '1: :->command' \
+    '*:: :->args'
+
+case $state in
+    command)
+        local commands=(
+            'add:Add a new worktree in ~/.worktrees/<repo>/<name>'
+            'list:List worktrees'
+            'remove:Remove a worktree'
+            'cd:Change directory into a worktree'
+            'lock:Lock a worktree'
+            'unlock:Unlock a worktree'
+            'move:Move a worktree to a new path'
+            'repair:Repair worktree administrative files'
+            'prune:Prune worktree information'
+            'setup:Install completions to standard shell locations'
+            'init:Print shell cd-wrapper function'
+            'completions:Print shell completion script'
+        )
+        _describe 'command' commands
+        ;;
+    args)
+        case $words[1] in
+            add)
+                _arguments \
+                    '(-b --branch)'{-b,--branch}'[Create and checkout a new branch]:branch name:' \
+                    '--detach[Detach HEAD]' \
+                    '--no-checkout[Skip file checkout after creating the worktree]' \
+                    '1:worktree name:' \
+                    '2:commit-ish:'
+                ;;
+            list)
+                _arguments \
+                    '--porcelain[Porcelain output format]' \
+                    '(-v --verbose)'{-v,--verbose}'[Verbose output]'
+                ;;
+            remove)
+                _arguments \
+                    '(-f --force)'{-f,--force}'[Force removal]' \
+                    '1:worktree:_work_worktree_names'
+                ;;
+            cd)
+                _arguments '1:worktree:_work_worktree_names'
+                ;;
+            lock)
+                _arguments \
+                    '--reason[Reason for locking]:reason:' \
+                    '1:worktree:_work_worktree_names'
+                ;;
+            unlock)
+                _arguments '1:worktree:_work_worktree_names'
+                ;;
+            move)
+                _arguments \
+                    '1:worktree:_work_worktree_names' \
+                    '2:new path:_files -/'
+                ;;
+            repair)
+                _arguments '1:path:_files -/'
+                ;;
+            prune)
+                _arguments \
+                    '(-n --dry-run)'{-n,--dry-run}'[Show what would be pruned]' \
+                    '(-v --verbose)'{-v,--verbose}'[Report all removals]' \
+                    '--expire[Only expire entries older than this]:expire:'
+                ;;
+            setup|init|completions)
+                _arguments '1:shell:(zsh fish bash)'
+                ;;
+        esac
+        ;;
+esac
+"#;
 
 const ZSH_COMPLETION: &str = r#"#compdef work
 
@@ -275,8 +435,9 @@ _work() {
                 'move:Move a worktree to a new path'
                 'repair:Repair worktree administrative files'
                 'prune:Prune worktree information'
-                'init:Print shell integration code'
-                'completions:Generate shell completions'
+                'setup:Install completions to standard shell locations'
+                'init:Print shell cd-wrapper function'
+                'completions:Print shell completion script'
             )
             _describe 'command' commands
             ;;
@@ -325,7 +486,7 @@ _work() {
                         '(-v --verbose)'{-v,--verbose}'[Report all removals]' \
                         '--expire[Only expire entries older than this]:expire:'
                     ;;
-                init|completions)
+                setup|init|completions)
                     _arguments '1:shell:(zsh fish bash)'
                     ;;
             esac
@@ -337,12 +498,13 @@ compdef _work work
 "#;
 
 const FISH_COMPLETION: &str = r#"# work — git worktree manager (fish completions)
+# ~/.config/fish/completions/work.fish
 
 function __work_worktree_names
     command work list-names 2>/dev/null
 end
 
-set -l __work_cmds add list remove cd lock unlock move repair prune init completions
+set -l __work_cmds add list remove cd lock unlock move repair prune setup init completions
 
 complete -c work -f
 
@@ -356,8 +518,9 @@ complete -c work -n "not __fish_seen_subcommand_from $__work_cmds" -a unlock    
 complete -c work -n "not __fish_seen_subcommand_from $__work_cmds" -a move        -d 'Move a worktree to a new path'
 complete -c work -n "not __fish_seen_subcommand_from $__work_cmds" -a repair      -d 'Repair worktree administrative files'
 complete -c work -n "not __fish_seen_subcommand_from $__work_cmds" -a prune       -d 'Prune worktree information'
-complete -c work -n "not __fish_seen_subcommand_from $__work_cmds" -a init        -d 'Print shell integration code'
-complete -c work -n "not __fish_seen_subcommand_from $__work_cmds" -a completions -d 'Generate shell completions'
+complete -c work -n "not __fish_seen_subcommand_from $__work_cmds" -a setup       -d 'Install completions to standard shell locations'
+complete -c work -n "not __fish_seen_subcommand_from $__work_cmds" -a init        -d 'Print shell cd-wrapper function'
+complete -c work -n "not __fish_seen_subcommand_from $__work_cmds" -a completions -d 'Print shell completion script'
 
 # add
 complete -c work -n "__fish_seen_subcommand_from add" -s b -l branch       -d 'Create and checkout a new branch' -r
@@ -390,16 +553,17 @@ complete -c work -n "__fish_seen_subcommand_from prune" -s n -l dry-run     -d '
 complete -c work -n "__fish_seen_subcommand_from prune" -s v -l verbose     -d 'Report all removals'
 complete -c work -n "__fish_seen_subcommand_from prune" -l expire           -d 'Only expire entries older than this' -r
 
-# init / completions — shell names
-complete -c work -n "__fish_seen_subcommand_from init completions" -a "zsh fish bash"
+# setup / init / completions — shell names
+complete -c work -n "__fish_seen_subcommand_from setup init completions" -a "zsh fish bash"
 "#;
 
 const BASH_COMPLETION: &str = r#"# work — git worktree manager (bash completions)
+# ~/.local/share/bash-completion/completions/work
 _work() {
     local cur prev words cword
     _init_completion || return
 
-    local all_commands="add list remove cd lock unlock move repair prune init completions"
+    local all_commands="add list remove cd lock unlock move repair prune setup init completions"
 
     if [[ $cword -eq 1 ]]; then
         COMPREPLY=($(compgen -W "$all_commands" -- "$cur"))
@@ -429,7 +593,7 @@ _work() {
             esac
             COMPREPLY=($(compgen -W "--dry-run --verbose --expire" -- "$cur"))
             ;;
-        init|completions)
+        setup|init|completions)
             COMPREPLY=($(compgen -W "zsh fish bash" -- "$cur"))
             ;;
     esac
