@@ -5,40 +5,46 @@ A git worktree manager that keeps worktrees organized under `~/.worktrees/<repo>
 ## Installation
 
 ```sh
-cargo install --path .
+make install
 ```
 
-Then add shell integration to your profile so `work cd` can change your shell's directory:
+This builds the binary, installs it via `cargo install`, and runs `work setup` to install shell completions and the directory-change wrapper automatically — no manual shell config needed.
 
-```zsh
-# ~/.zshrc or ~/.bashrc
-eval "$(work init zsh)"   # or bash
+Requires Homebrew or oh-my-zsh for zero-config setup on macOS. For other setups, run `work setup zsh|fish|bash` manually and follow any printed instructions.
 
-# ~/.config/fish/config.fish
-work init fish | source
+### fzf (optional)
+
+Install [fzf](https://github.com/junegunn/fzf) to enable the interactive worktree picker (`work on` with no arguments).
+
+```sh
+brew install fzf
 ```
 
 ## Usage
 
-### Add a worktree
+### Switch to a worktree (primary command)
 
 ```sh
-# New branch named after the worktree
-work add feature-x
+work on feature-x        # switch to worktree, creating it first if it doesn't exist
+work on                  # open fzf picker — shows branch, dirty status, last commit
+```
 
-# Check out an existing branch
-work add feature-x main
+`work on` is the main entry point. It creates the worktree if it doesn't exist, then changes your shell's directory to it.
 
-# New branch with a different name
-work add feature-x -b my-branch
+The fzf picker shows rich info for each worktree and works from anywhere — inside a repo (shows that repo's worktrees) or outside (shows all worktrees across all repos).
 
-# Detached HEAD
-work add feature-x --detach
+### Add a worktree without switching
+
+```sh
+work add feature-x                # new branch named after the worktree
+work add feature-x main           # check out an existing branch
+work add feature-x -b my-branch   # new branch with a different name
+work add feature-x --detach       # detached HEAD
 ```
 
 Worktrees are stored at `~/.worktrees/<repo>/<name>`.
 
-### Navigate
+### Change directory into an existing worktree
 
 ```sh
 work cd feature-x
@@ -88,12 +94,10 @@ work repair
 
 ## Tab completion
 
-Completion scripts for zsh, fish, and bash are built into the binary. Worktree names are completed dynamically from `~/.worktrees/<repo>/` for the current repository.
+Completions for zsh, fish, and bash are installed automatically by `make install`. Worktree names are completed dynamically and include branch name, dirty status, and last commit message.
 
 ```sh
-work completions zsh   # print zsh completion script
-work completions fish  # print fish completion script
-work completions bash  # print bash completion script
+work on <TAB>   # shows: name  branch ! · last commit (time ago) [repo]
 ```
 
-The `init` command already sources completions automatically, so no extra setup is needed if you're using `eval "$(work init zsh)"`.
+When inside a repo, only that repo's worktrees are shown. Outside a repo, all worktrees across all repos are shown with a `[repo]` label.
