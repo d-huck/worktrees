@@ -201,7 +201,12 @@ work() {
     fi
 }
 
-# Tab completions (sourced inline so they update automatically)
+# Tab completions — sourced inline so they stay in sync with the binary.
+# compdef is called inside the completion script; this line ensures the
+# completion system is initialised first so compdef is available.
+if (( ! $+functions[compdef] )); then
+    autoload -Uz compinit && compinit
+fi
 source <(command work completions zsh)
 "#;
 
@@ -328,12 +333,7 @@ _work() {
     esac
 }
 
-# Support both fpath autoload (#compdef) and direct sourcing via source <(...)
-if [[ "${funcstack[1]}" == "_work" ]]; then
-    _work "$@"
-else
-    compdef _work work
-fi
+compdef _work work
 "#;
 
 const FISH_COMPLETION: &str = r#"# work — git worktree manager (fish completions)
