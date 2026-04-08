@@ -1,3 +1,4 @@
+mod jj;
 mod worktree;
 
 use anyhow::{Context, Result};
@@ -12,7 +13,7 @@ enum Shell {
 }
 
 #[derive(Parser)]
-#[command(name = "work", about = "Git worktree manager — stores worktrees in ~/.worktrees/<repo>/<name>")]
+#[command(name = "work", about = "Worktree/workspace manager — stores worktrees in ~/.worktrees/<repo>/<name>. Auto-detects jj and uses jj workspaces instead of git worktrees.")]
 #[command(version)]
 struct Cli {
     #[command(subcommand)]
@@ -21,7 +22,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Add a new worktree stored in ~/.worktrees/<repo>/<name>
+    /// Add a new worktree (git) or workspace (jj) stored in ~/.worktrees/<repo>/<name>
     Add {
         /// Name of the worktree (becomes the directory name and default branch name)
         name: String,
