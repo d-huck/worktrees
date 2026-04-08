@@ -2,6 +2,20 @@ use anyhow::{anyhow, Context, Result};
 use std::path::PathBuf;
 use std::process::Command;
 
+// ── VCS detection ─────────────────────────────────────────────────────────────
+
+/// Returns true when the current directory is inside a jj workspace.
+/// Prefers jj over git in colocated repos, matching a jj-first workflow.
+pub fn detect_jj() -> bool {
+    Command::new("jj")
+        .args(["workspace", "root"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
 pub fn get_repo_name() -> Result<String> {
     // Try git remote get-url origin first
     let output = Command::new("git")
@@ -60,6 +74,9 @@ pub fn repo_worktrees_dir() -> Result<PathBuf> {
 }
 
 pub fn resolve_path(name: &str) -> Result<PathBuf> {
+    if detect_jj() {
+        return crate::jj::resolve_path(name);
+    }
     let path = repo_worktrees_dir()?.join(name);
     if !path.exists() {
         return Err(anyhow!(
@@ -78,6 +95,12 @@ pub fn add(
     detach: bool,
     no_checkout: bool,
 ) -> Result<()> {
+    if detect_jj() {
+        if branch.is_some() || detach || no_checkout {
+            eprintln!("note: --branch, --detach, and --no-checkout are git-only; ignored in jj mode");
+        }
+        return crate::jj::add(name, commit_ish);
+    }
     let base = repo_worktrees_dir()?;
     std::fs::create_dir_all(&base)
         .with_context(|| format!("Failed to create directory {}", base.display()))?;
@@ -118,6 +141,12 @@ pub fn add(
 }
 
 pub fn list(porcelain: bool, verbose: bool) -> Result<()> {
+    if detect_jj() {
+        if porcelain || verbose {
+            eprintln!("note: --porcelain and --verbose are git-only; running plain jj workspace list");
+        }
+        return crate::jj::list();
+    }
     let mut cmd = Command::new("git");
     cmd.args(["worktree", "list"]);
     if porcelain {
@@ -134,6 +163,12 @@ pub fn list(porcelain: bool, verbose: bool) -> Result<()> {
 }
 
 pub fn remove(name: &str, force: bool) -> Result<()> {
+    if detect_jj() {
+        if force {
+            eprintln!("note: --force is a git-only flag; jj workspace forget always proceeds");
+        }
+        return crate::jj::remove(name);
+    }
     let path = resolve_path(name)?;
     let mut cmd = Command::new("git");
     cmd.args(["worktree", "remove"]);
@@ -149,6 +184,9 @@ pub fn remove(name: &str, force: bool) -> Result<()> {
 }
 
 pub fn lock(name: &str, reason: Option<&str>) -> Result<()> {
+    if detect_jj() {
+        return Err(anyhow!("'work lock' is not supported in jj mode (jj workspaces have no lock mechanism)"));
+    }
     let path = resolve_path(name)?;
     let mut cmd = Command::new("git");
     cmd.args(["worktree", "lock"]);
@@ -164,6 +202,9 @@ pub fn lock(name: &str, reason: Option<&str>) -> Result<()> {
 }
 
 pub fn unlock(name: &str) -> Result<()> {
+    if detect_jj() {
+        return Err(anyhow!("'work unlock' is not supported in jj mode"));
+    }
     let path = resolve_path(name)?;
     let status = Command::new("git")
         .args(["worktree", "unlock"])
@@ -177,6 +218,9 @@ pub fn unlock(name: &str) -> Result<()> {
 }
 
 pub fn move_worktree(name: &str, new_path: &str) -> Result<()> {
+    if detect_jj() {
+        return crate::jj::move_workspace(name, new_path);
+    }
     let path = resolve_path(name)?;
     let status = Command::new("git")
         .args(["worktree", "move"])
@@ -191,6 +235,9 @@ pub fn move_worktree(name: &str, new_path: &str) -> Result<()> {
 }
 
 pub fn repair(path: Option<&str>) -> Result<()> {
+    if detect_jj() {
+        return Err(anyhow!("'work repair' is not supported in jj mode (jj workspaces self-heal)"));
+    }
     let mut cmd = Command::new("git");
     cmd.args(["worktree", "repair"]);
     if let Some(p) = path {
@@ -204,6 +251,9 @@ pub fn repair(path: Option<&str>) -> Result<()> {
 }
 
 pub fn prune(dry_run: bool, verbose: bool, expire: Option<&str>) -> Result<()> {
+    if detect_jj() {
+        return Err(anyhow!("'work prune' is not supported in jj mode (use 'work remove' to clean up individual workspaces)"));
+    }
     let mut cmd = Command::new("git");
     cmd.args(["worktree", "prune"]);
     if dry_run {
@@ -223,6 +273,9 @@ pub fn prune(dry_run: bool, verbose: bool, expire: Option<&str>) -> Result<()> {
 }
 
 pub fn on(name: &str) -> Result<PathBuf> {
+    if detect_jj() {
+        return crate::jj::on(name);
+    }
     let path = repo_worktrees_dir()?.join(name);
     if !path.exists() {
         add(name, None, None, false, false)?;
@@ -231,6 +284,9 @@ pub fn on(name: &str) -> Result<PathBuf> {
 }
 
 pub fn list_names() -> Result<()> {
+    if detect_jj() {
+        return crate::jj::list_names();
+    }
     let dir = match repo_worktrees_dir() {
         Ok(d) => d,
         Err(_) => return Ok(()),
@@ -281,6 +337,9 @@ fn worktree_last_commit(path: &std::path::Path) -> String {
 }
 
 pub fn list_names_with_info() -> Result<()> {
+    if detect_jj() {
+        return crate::jj::list_names_with_info();
+    }
     let dir = match repo_worktrees_dir() {
         Ok(d) => d,
         Err(_) => return Ok(()),
@@ -316,7 +375,7 @@ const DIM: &str = "\x1b[2m";
 const RED: &str = "\x1b[31m";
 const CYAN: &str = "\x1b[36m";
 
-fn fzf_display(name: &str, repo: Option<&str>, branch: &str, dirty: bool, commit: &str) -> String {
+pub fn fzf_display(name: &str, repo: Option<&str>, branch: &str, dirty: bool, commit: &str) -> String {
     let repo_part = match repo {
         Some(r) => format!("{DIM}[{r}]{RS} "),
         None => String::new(),
@@ -333,6 +392,9 @@ fn fzf_display(name: &str, repo: Option<&str>, branch: &str, dirty: bool, commit
 }
 
 pub fn list_fzf() -> Result<()> {
+    if detect_jj() {
+        return crate::jj::list_fzf();
+    }
     // Try current repo first; fall back to all repos.
     let (dir, global) = match repo_worktrees_dir() {
         Ok(d) if d.exists() => (d, false),
@@ -378,13 +440,16 @@ pub fn list_fzf() -> Result<()> {
 // Output format for completion commands: tab-separated fields with no ANSI codes.
 // Fields: branch \t dirty(1|0) \t commit \t repo(optional)
 // Zsh applies its own %F{} formatting so it can correctly calculate visual width.
-fn print_info_line(name: &str, repo: Option<&str>, branch: &str, dirty: bool, commit: &str) {
+pub fn print_info_line(name: &str, repo: Option<&str>, branch: &str, dirty: bool, commit: &str) {
     let dirty_flag = if dirty { "1" } else { "0" };
     let repo_field = repo.unwrap_or("");
     println!("{}\t{}\t{}\t{}\t{}", name, branch, dirty_flag, commit, repo_field);
 }
 
 pub fn list_all_names_with_info() -> Result<()> {
+    if detect_jj() {
+        return crate::jj::list_all_names_with_info();
+    }
     let base = worktrees_base();
     if !base.exists() {
         return Ok(());
@@ -424,6 +489,9 @@ pub fn list_all_names_with_info() -> Result<()> {
 }
 
 pub fn list_all_names() -> Result<()> {
+    if detect_jj() {
+        return crate::jj::list_all_names();
+    }
     let base = worktrees_base();
     if !base.exists() {
         return Ok(());
