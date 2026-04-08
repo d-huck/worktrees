@@ -203,22 +203,76 @@ fn home() -> PathBuf {
     dirs::home_dir().expect("Could not determine home directory")
 }
 
-fn setup_zsh() -> Result<()> {
-    // The completion file goes in ~/.zfunc/_work, which zsh autoloads via $fpath.
-    // The file content is the function body directly (traditional zsh autoload format),
-    // so no _work(){} wrapper — the #compdef directive handles registration.
-    let completion_path = home().join(".zfunc").join("_work");
-    write_file(&completion_path, ZSH_FPATH_COMPLETION)?;
+fn zsh_site_functions_dir() -> Option<PathBuf> {
+    // Prefer Homebrew's site-functions — already on $fpath, user-writable, no config needed.
+    if let Ok(out) = std::process::Command::new("brew").arg("--prefix").output() {
+        if out.status.success() {
+            let prefix = String::from_utf8(out.stdout).unwrap_or_default().trim().to_string();
+            let p = PathBuf::from(prefix).join("share/zsh/site-functions");
+            if p.exists() {
+                return Some(p);
+            }
+        }
+    }
+    // Fall back to oh-my-zsh custom completions directory.
+    let p = home().join(".oh-my-zsh/custom/completions");
+    if p.exists() {
+        return Some(p);
+    }
+    None
+}
 
-    println!();
-    println!("Add the following to your ~/.zshrc (before compinit / oh-my-zsh source):");
-    println!();
-    println!("  fpath=(~/.zfunc $fpath)");
-    println!();
-    println!("And add this shell function so `work cd` can change your directory:");
-    println!();
-    println!("{}", ZSH_FUNCTION.trim_end().lines().map(|l| format!("  {l}")).collect::<Vec<_>>().join("\n"));
-    println!();
+fn zsh_function_dir() -> Option<PathBuf> {
+    // oh-my-zsh sources every *.zsh file in $ZSH_CUSTOM automatically.
+    let p = home().join(".oh-my-zsh/custom");
+    if p.exists() {
+        return Some(p);
+    }
+    None
+}
+
+fn setup_zsh() -> Result<()> {
+    let mut manual_steps: Vec<String> = vec![];
+
+    // ── Completion file ──────────────────────────────────────────────────────
+    match zsh_site_functions_dir() {
+        Some(dir) => {
+            write_file(&dir.join("_work"), ZSH_FPATH_COMPLETION)?;
+        }
+        None => {
+            // Fall back to ~/.zfunc and tell the user what to add.
+            let p = home().join(".zfunc/_work");
+            write_file(&p, ZSH_FPATH_COMPLETION)?;
+            manual_steps.push("Add to ~/.zshrc (before compinit):  fpath=(~/.zfunc $fpath)".into());
+        }
+    }
+
+    // ── Shell function (needed for `work cd`) ────────────────────────────────
+    match zsh_function_dir() {
+        Some(dir) => {
+            write_file(&dir.join("work.zsh"), ZSH_FUNCTION)?;
+        }
+        None => {
+            manual_steps.push(format!(
+                "Add to ~/.zshrc:\n{}",
+                ZSH_FUNCTION.trim_end().lines().map(|l| format!("  {l}")).collect::<Vec<_>>().join("\n")
+            ));
+        }
+    }
+
+    if manual_steps.is_empty() {
+        println!();
+        println!("Done! Open a new shell and `work <TAB>` should work.");
+    } else {
+        println!();
+        println!("Partial setup — complete it by adding the following to your shell:");
+        println!();
+        for step in &manual_steps {
+            println!("{step}");
+            println!();
+        }
+    }
+
     Ok(())
 }
 
