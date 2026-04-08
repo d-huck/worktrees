@@ -103,8 +103,13 @@ pub fn add(
         cmd.arg(c);
     }
 
-    let status = cmd.status().context("Failed to run git worktree add")?;
-    if !status.success() {
+    // Use output() instead of status() so git's stdout doesn't leak into our stdout.
+    // The shell function captures our stdout to get the worktree path; any git
+    // progress messages mixed in would corrupt it and cause `cd` to fail.
+    let output = cmd.output().context("Failed to run git worktree add")?;
+    std::io::Write::write_all(&mut std::io::stderr(), &output.stdout).ok();
+    std::io::Write::write_all(&mut std::io::stderr(), &output.stderr).ok();
+    if !output.status.success() {
         return Err(anyhow!("git worktree add failed"));
     }
 
@@ -245,6 +250,174 @@ pub fn list_names() -> Result<()> {
     entries.sort();
     for name in entries {
         println!("{}", name);
+    }
+
+    Ok(())
+}
+
+fn worktree_branch(path: &std::path::Path) -> String {
+    Command::new("git")
+        .args(["-C", &path.to_string_lossy(), "branch", "--show-current"])
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default()
+}
+
+fn worktree_dirty(path: &std::path::Path) -> bool {
+    Command::new("git")
+        .args(["-C", &path.to_string_lossy(), "status", "--porcelain"])
+        .output()
+        .map(|o| !o.stdout.is_empty())
+        .unwrap_or(false)
+}
+
+
+fn worktree_last_commit(path: &std::path::Path) -> String {
+    Command::new("git")
+        .args(["-C", &path.to_string_lossy(), "log", "-1", "--format=%s (%cr)"])
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default()
+}
+
+pub fn list_names_with_info() -> Result<()> {
+    let dir = match repo_worktrees_dir() {
+        Ok(d) => d,
+        Err(_) => return Ok(()),
+    };
+
+    if !dir.exists() {
+        return Ok(());
+    }
+
+    let mut entries = std::fs::read_dir(&dir)
+        .with_context(|| format!("Failed to read {}", dir.display()))?
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .collect::<Vec<_>>();
+
+    entries.sort();
+    for name in entries {
+        let path = dir.join(&name);
+        let branch = worktree_branch(&path);
+        let dirty = worktree_dirty(&path);
+        let commit = worktree_last_commit(&path);
+        print_info_line(&name, None, &branch, dirty, &commit);
+    }
+
+    Ok(())
+}
+
+// ANSI helpers — used in fzf output (fzf renders raw ANSI with --ansi)
+const RS: &str = "\x1b[0m";
+const BOLD: &str = "\x1b[1m";
+const DIM: &str = "\x1b[2m";
+const RED: &str = "\x1b[31m";
+const CYAN: &str = "\x1b[36m";
+
+fn fzf_display(name: &str, repo: Option<&str>, branch: &str, dirty: bool, commit: &str) -> String {
+    let repo_part = match repo {
+        Some(r) => format!("{DIM}[{r}]{RS} "),
+        None => String::new(),
+    };
+    let dirty_part = if dirty { format!(" {RED}!{RS}") } else { String::new() };
+    let commit_part = if commit.is_empty() {
+        String::new()
+    } else {
+        format!(" {DIM}· {commit}{RS}")
+    };
+    format!(
+        "{BOLD}{name}{RS}  {repo_part}{CYAN}{BOLD}{branch}{RS}{dirty_part}{commit_part}"
+    )
+}
+
+pub fn list_fzf() -> Result<()> {
+    // Try current repo first; fall back to all repos.
+    let (dir, global) = match repo_worktrees_dir() {
+        Ok(d) if d.exists() => (d, false),
+        _ => {
+            let base = worktrees_base();
+            if !base.exists() { return Ok(()); }
+            (base, true)
+        }
+    };
+
+    if global {
+        let mut rows: Vec<(String, String, String, bool, String)> = vec![];
+        for repo_entry in std::fs::read_dir(&dir)? {
+            let repo_entry = repo_entry?;
+            if !repo_entry.file_type()?.is_dir() { continue; }
+            let repo_name = repo_entry.file_name().to_string_lossy().to_string();
+            for wt_entry in std::fs::read_dir(repo_entry.path())?.flatten() {
+                if !wt_entry.file_type().map(|t| t.is_dir()).unwrap_or(false) { continue; }
+                let name = wt_entry.file_name().to_string_lossy().to_string();
+                let path = wt_entry.path();
+                rows.push((name, repo_name.clone(), worktree_branch(&path), worktree_dirty(&path), worktree_last_commit(&path)));
+            }
+        }
+        rows.sort_by(|a, b| a.0.cmp(&b.0));
+        for (name, repo, branch, dirty, commit) in rows {
+            println!("{}\t{}", name, fzf_display(&name, Some(&repo), &branch, dirty, &commit));
+        }
+    } else {
+        let mut entries: Vec<String> = std::fs::read_dir(&dir)?
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .collect();
+        entries.sort();
+        for name in entries {
+            let path = dir.join(&name);
+            println!("{}\t{}", name, fzf_display(&name, None, &worktree_branch(&path), worktree_dirty(&path), &worktree_last_commit(&path)));
+        }
+    }
+    Ok(())
+}
+
+// Output format for completion commands: tab-separated fields with no ANSI codes.
+// Fields: branch \t dirty(1|0) \t commit \t repo(optional)
+// Zsh applies its own %F{} formatting so it can correctly calculate visual width.
+fn print_info_line(name: &str, repo: Option<&str>, branch: &str, dirty: bool, commit: &str) {
+    let dirty_flag = if dirty { "1" } else { "0" };
+    let repo_field = repo.unwrap_or("");
+    println!("{}\t{}\t{}\t{}\t{}", name, branch, dirty_flag, commit, repo_field);
+}
+
+pub fn list_all_names_with_info() -> Result<()> {
+    let base = worktrees_base();
+    if !base.exists() {
+        return Ok(());
+    }
+
+    let mut rows: Vec<(String, String, String, bool, String)> = vec![];
+
+    for repo_entry in std::fs::read_dir(&base)
+        .with_context(|| format!("Failed to read {}", base.display()))?
+    {
+        let repo_entry = repo_entry?;
+        if !repo_entry.file_type()?.is_dir() {
+            continue;
+        }
+        let repo_name = repo_entry.file_name().to_string_lossy().to_string();
+        if let Ok(wt_entries) = std::fs::read_dir(repo_entry.path()) {
+            for wt_entry in wt_entries.flatten() {
+                if !wt_entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                    continue;
+                }
+                let name = wt_entry.file_name().to_string_lossy().to_string();
+                let path = wt_entry.path();
+                let branch = worktree_branch(&path);
+                let dirty = worktree_dirty(&path);
+                let commit = worktree_last_commit(&path);
+                rows.push((name, repo_name.clone(), branch, dirty, commit));
+            }
+        }
+    }
+
+    rows.sort_by(|a, b| a.0.cmp(&b.0));
+    for (name, repo, branch, dirty, commit) in rows {
+        print_info_line(&name, Some(&repo), &branch, dirty, &commit);
     }
 
     Ok(())

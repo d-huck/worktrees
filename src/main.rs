@@ -127,6 +127,15 @@ enum Commands {
     /// List worktree names for the current repo (used internally by completions)
     #[command(hide = true, name = "list-names")]
     ListNames,
+    /// List worktree names with branch/status info for the current repo (used internally by completions)
+    #[command(hide = true, name = "list-names-info")]
+    ListNamesInfo,
+    /// List worktrees formatted for fzf (name\tANSI display line)
+    #[command(hide = true, name = "list-fzf")]
+    ListFzf,
+    /// List all worktree names with info across every repo (used internally by completions)
+    #[command(hide = true, name = "list-all-names-info")]
+    ListAllNamesInfo,
     /// List all worktree names across every repo (used internally by completions)
     #[command(hide = true, name = "list-all-names")]
     ListAllNames,
@@ -187,6 +196,15 @@ fn main() -> Result<()> {
         Commands::ListNames => {
             worktree::list_names()?;
         }
+        Commands::ListNamesInfo => {
+            worktree::list_names_with_info()?;
+        }
+        Commands::ListFzf => {
+            worktree::list_fzf()?;
+        }
+        Commands::ListAllNamesInfo => {
+            worktree::list_all_names_with_info()?;
+        }
         Commands::ListAllNames => {
             worktree::list_all_names()?;
         }
@@ -240,7 +258,14 @@ fn zsh_site_functions_dir() -> Option<PathBuf> {
 }
 
 fn zsh_function_dir() -> Option<PathBuf> {
-    // oh-my-zsh sources every *.zsh file in $ZSH_CUSTOM automatically.
+    // Respect $ZSH_CUSTOM if the user has customised it (oh-my-zsh exports this).
+    if let Ok(custom) = std::env::var("ZSH_CUSTOM") {
+        let p = PathBuf::from(&custom);
+        if p.exists() {
+            return Some(p);
+        }
+    }
+    // Fall back to the default oh-my-zsh custom directory.
     let p = home().join(".oh-my-zsh/custom");
     if p.exists() {
         return Some(p);
@@ -264,10 +289,16 @@ fn setup_zsh() -> Result<()> {
         }
     }
 
-    // ── Shell function (needed for `work cd`) ────────────────────────────────
+    // ── Shell function (needed for `work cd` / `work on`) ───────────────────
     match zsh_function_dir() {
         Some(dir) => {
-            write_file(&dir.join("work.zsh"), ZSH_FUNCTION)?;
+            let fn_path = dir.join("work.zsh");
+            write_file(&fn_path, ZSH_FUNCTION)?;
+            eprintln!(
+                "Shell function will be auto-sourced from {} (ZSH_CUSTOM = {:?})",
+                fn_path.display(),
+                std::env::var("ZSH_CUSTOM").unwrap_or_else(|_| "~/.oh-my-zsh/custom (default)".into())
+            );
         }
         None => {
             manual_steps.push(format!(
@@ -279,7 +310,7 @@ fn setup_zsh() -> Result<()> {
 
     if manual_steps.is_empty() {
         println!();
-        println!("Done! Open a new shell and `work <TAB>` should work.");
+        println!("Done! Open a new shell (or source the function file above) and `work cd` / `work on` should change directory.");
     } else {
         println!();
         println!("Partial setup — complete it by adding the following to your shell:");
@@ -346,7 +377,24 @@ fn print_completions(shell: &Shell) {
 const ZSH_FUNCTION: &str = r#"# work — git worktree manager (zsh function)
 work() {
     case "$1" in
-        cd|on)
+        on)
+            if [[ $# -eq 1 ]]; then
+                if ! command -v fzf &>/dev/null; then
+                    echo "work: fzf not found — provide a worktree name or install fzf" >&2
+                    return 1
+                fi
+                local selected
+                selected=$(command work list-fzf 2>/dev/null \
+                    | fzf --ansi --delimiter=$'\t' --with-nth=2) || return 0
+                [[ -z $selected ]] && return 0
+                builtin cd "$(command work on "${selected%%$'\t'*}")" || return 1
+            else
+                local target
+                target=$(command work "$@") || return 1
+                builtin cd "$target"
+            fi
+            ;;
+        cd)
             local target
             target=$(command work "$@") || return 1
             builtin cd "$target"
@@ -361,7 +409,24 @@ work() {
 const BASH_FUNCTION: &str = r#"# work — git worktree manager (bash function)
 work() {
     case "$1" in
-        cd|on)
+        on)
+            if [[ $# -eq 1 ]]; then
+                if ! command -v fzf &>/dev/null; then
+                    echo "work: fzf not found — provide a worktree name or install fzf" >&2
+                    return 1
+                fi
+                local selected
+                selected=$(command work list-fzf 2>/dev/null \
+                    | fzf --ansi --delimiter=$'\t' --with-nth=2) || return 0
+                [[ -z $selected ]] && return 0
+                builtin cd "$(command work on "${selected%%$'\t'*}")" || return 1
+            else
+                local target
+                target=$(command work "$@") || return 1
+                builtin cd "$target"
+            fi
+            ;;
+        cd)
             local target
             target=$(command work "$@") || return 1
             builtin cd "$target"
@@ -377,7 +442,22 @@ const FISH_FUNCTION: &str = r#"# work — git worktree manager (fish function)
 # ~/.config/fish/functions/work.fish
 function work
     switch $argv[1]
-        case cd on
+        case on
+            if test (count $argv) -eq 1
+                if not command -v fzf &>/dev/null
+                    echo "work: fzf not found — provide a worktree name or install fzf" >&2
+                    return 1
+                end
+                set selected (command work list-fzf 2>/dev/null \
+                    | fzf --ansi --delimiter=\t --with-nth=2)
+                or return 0
+                test -z "$selected"; and return 0
+                cd (command work on (string split \t $selected)[1])
+            else
+                set target (command work $argv)
+                and cd $target
+            end
+        case cd
             set target (command work $argv)
             and cd $target
         case '*'
@@ -402,6 +482,26 @@ const ZSH_FPATH_COMPLETION: &str = r#"#compdef work
 _work_worktree_names() {
     local names
     names=(${(f)"$(command work list-names 2>/dev/null)"})
+    _describe 'worktree' names
+}
+
+_work_on_names() {
+    local -a names
+    local subcmd line
+    for subcmd in list-names-info list-all-names-info; do
+        for line in ${(f)"$(command work $subcmd 2>/dev/null)"}; do
+            local fields=("${(@s:	:)line}")
+            local name=$fields[1] branch=$fields[2] dirty=$fields[3]
+            local commit=$fields[4] repo=$fields[5]
+            [[ -z $name ]] && continue
+            local desc="${branch:0:30}${${branch:30}:+…}"
+            [[ $dirty == 1 ]] && desc+=" !"
+            [[ -n $commit ]] && desc+=" · ${commit:0:45}${${commit:45}:+…}"
+            [[ -n $repo ]] && desc+=" [$repo]"
+            names+=("${name}:${desc}")
+        done
+        (( ${#names} > 0 )) && break
+    done
     _describe 'worktree' names
 }
 
@@ -497,10 +597,19 @@ _work_worktree_names() {
 }
 
 _work_on_names() {
-    # Prefer current-repo worktrees; fall back to all repos when not in a git repo.
-    local names
-    names=(${(f)"$(command work list-names 2>/dev/null)"})
-    (( ${#names} == 0 )) && names=(${(f)"$(command work list-all-names 2>/dev/null)"})
+    # Prefer current-repo worktrees with rich info; fall back to all repos.
+    local -a names
+    local name desc
+    while IFS=$'\t' read -r name desc; do
+        names+=("$name:$desc")
+    done < <(command work list-names-info 2>/dev/null)
+    if (( ${#names} == 0 )); then
+        for line in ${(f)"$(command work list-all-names-info 2>/dev/null)"}; do
+            local name=${line%%$'\t'*}
+            local desc=${line#*$'\t'}
+            [[ -n $name ]] && names+=("$name:$desc")
+        done
+    fi
     _describe 'worktree' names
 }
 
@@ -599,12 +708,12 @@ function __work_worktree_names
 end
 
 function __work_on_names
-    # Prefer current-repo worktrees; fall back to all repos when not in a git repo.
-    set -l names (command work list-names 2>/dev/null)
-    if test (count $names) -gt 0
-        printf '%s\n' $names
+    # Prefer current-repo worktrees with rich info; fall back to all repos with rich info.
+    set -l info (command work list-names-info 2>/dev/null)
+    if test (count $info) -gt 0
+        printf '%s\n' $info
     else
-        command work list-all-names 2>/dev/null
+        command work list-all-names-info 2>/dev/null
     end
 end
 
