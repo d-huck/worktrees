@@ -435,7 +435,7 @@ case $state in
     args)
         case $words[1] in
             on)
-                _arguments '1:worktree:_work_all_worktree_names'
+                _arguments '1:worktree:_work_on_names'
                 ;;
             add)
                 _arguments \
@@ -496,9 +496,11 @@ _work_worktree_names() {
     _describe 'worktree' names
 }
 
-_work_all_worktree_names() {
+_work_on_names() {
+    # Prefer current-repo worktrees; fall back to all repos when not in a git repo.
     local names
-    names=(${(f)"$(command work list-all-names 2>/dev/null)"})
+    names=(${(f)"$(command work list-names 2>/dev/null)"})
+    (( ${#names} == 0 )) && names=(${(f)"$(command work list-all-names 2>/dev/null)"})
     _describe 'worktree' names
 }
 
@@ -533,7 +535,7 @@ _work() {
         args)
             case $words[1] in
                 on)
-                    _arguments '1:worktree:_work_all_worktree_names'
+                    _arguments '1:worktree:_work_on_names'
                     ;;
                 add)
                     _arguments \
@@ -596,8 +598,14 @@ function __work_worktree_names
     command work list-names 2>/dev/null
 end
 
-function __work_all_worktree_names
-    command work list-all-names 2>/dev/null
+function __work_on_names
+    # Prefer current-repo worktrees; fall back to all repos when not in a git repo.
+    set -l names (command work list-names 2>/dev/null)
+    if test (count $names) -gt 0
+        printf '%s\n' $names
+    else
+        command work list-all-names 2>/dev/null
+    end
 end
 
 set -l __work_cmds on add list remove cd lock unlock move repair prune setup init completions
@@ -619,8 +627,8 @@ complete -c work -n "not __fish_seen_subcommand_from $__work_cmds" -a setup     
 complete -c work -n "not __fish_seen_subcommand_from $__work_cmds" -a init        -d 'Print shell cd-wrapper function'
 complete -c work -n "not __fish_seen_subcommand_from $__work_cmds" -a completions -d 'Print shell completion script'
 
-# on — all worktrees across all repos
-complete -c work -n "__fish_seen_subcommand_from on" -a "(__work_all_worktree_names)"
+# on — current repo worktrees, falling back to all repos when not in a git repo
+complete -c work -n "__fish_seen_subcommand_from on" -a "(__work_on_names)"
 
 # add
 complete -c work -n "__fish_seen_subcommand_from add" -s b -l branch       -d 'Create and checkout a new branch' -r
@@ -675,7 +683,8 @@ _work() {
     case "$subcmd" in
         on)
             local names
-            names=$(command work list-all-names 2>/dev/null)
+            names=$(command work list-names 2>/dev/null)
+            [[ -z "$names" ]] && names=$(command work list-all-names 2>/dev/null)
             COMPREPLY=($(compgen -W "$names" -- "$cur"))
             ;;
         remove|cd|lock|unlock|move)
