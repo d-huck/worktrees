@@ -54,6 +54,11 @@ enum Commands {
         #[arg(short, long)]
         force: bool,
     },
+    /// Switch to a worktree, creating it first if it doesn't exist
+    On {
+        /// Name of the worktree
+        name: String,
+    },
     /// Print the path to a worktree (used by the shell function for `work cd`)
     Cd {
         /// Name of the worktree
@@ -122,6 +127,9 @@ enum Commands {
     /// List worktree names for the current repo (used internally by completions)
     #[command(hide = true, name = "list-names")]
     ListNames,
+    /// List all worktree names across every repo (used internally by completions)
+    #[command(hide = true, name = "list-all-names")]
+    ListAllNames,
 }
 
 fn main() -> Result<()> {
@@ -142,6 +150,12 @@ fn main() -> Result<()> {
         }
         Commands::Remove { name, force } => {
             worktree::remove(&name, force)?;
+        }
+        Commands::On { name } => {
+            // Print the path to stdout — the shell function captures this and does `cd`.
+            // Creates the worktree first if it doesn't already exist.
+            let path = worktree::on(&name)?;
+            println!("{}", path.display());
         }
         Commands::Cd { name } => {
             // Print the path to stdout — the shell function captures this and does `cd`
@@ -172,6 +186,9 @@ fn main() -> Result<()> {
         Commands::Completions { shell } => print_completions(&shell),
         Commands::ListNames => {
             worktree::list_names()?;
+        }
+        Commands::ListAllNames => {
+            worktree::list_all_names()?;
         }
     }
 
@@ -328,36 +345,43 @@ fn print_completions(shell: &Shell) {
 
 const ZSH_FUNCTION: &str = r#"# work — git worktree manager (zsh function)
 work() {
-    if [[ "$1" == "cd" ]]; then
-        local target
-        target=$(command work cd "${@:2}") || return 1
-        builtin cd "$target"
-    else
-        command work "$@"
-    fi
+    case "$1" in
+        cd|on)
+            local target
+            target=$(command work "$@") || return 1
+            builtin cd "$target"
+            ;;
+        *)
+            command work "$@"
+            ;;
+    esac
 }
 "#;
 
 const BASH_FUNCTION: &str = r#"# work — git worktree manager (bash function)
 work() {
-    if [[ "$1" == "cd" ]]; then
-        local target
-        target=$(command work cd "${@:2}") || return 1
-        builtin cd "$target"
-    else
-        command work "$@"
-    fi
+    case "$1" in
+        cd|on)
+            local target
+            target=$(command work "$@") || return 1
+            builtin cd "$target"
+            ;;
+        *)
+            command work "$@"
+            ;;
+    esac
 }
 "#;
 
 const FISH_FUNCTION: &str = r#"# work — git worktree manager (fish function)
 # ~/.config/fish/functions/work.fish
 function work
-    if test "$argv[1]" = "cd"
-        set target (command work cd $argv[2..])
-        and cd $target
-    else
-        command work $argv
+    switch $argv[1]
+        case cd on
+            set target (command work $argv)
+            and cd $target
+        case '*'
+            command work $argv
     end
 end
 "#;
@@ -392,6 +416,7 @@ _arguments -C \
 case $state in
     command)
         local commands=(
+            'on:Switch to a worktree, creating it if it does not exist'
             'add:Add a new worktree in ~/.worktrees/<repo>/<name>'
             'list:List worktrees'
             'remove:Remove a worktree'
@@ -409,6 +434,9 @@ case $state in
         ;;
     args)
         case $words[1] in
+            on)
+                _arguments '1:worktree:_work_all_worktree_names'
+                ;;
             add)
                 _arguments \
                     '(-b --branch)'{-b,--branch}'[Create and checkout a new branch]:branch name:' \
@@ -468,6 +496,12 @@ _work_worktree_names() {
     _describe 'worktree' names
 }
 
+_work_all_worktree_names() {
+    local names
+    names=(${(f)"$(command work list-all-names 2>/dev/null)"})
+    _describe 'worktree' names
+}
+
 _work() {
     local state
 
@@ -480,6 +514,7 @@ _work() {
     case $state in
         command)
             local commands=(
+                'on:Switch to a worktree, creating it if it does not exist'
                 'add:Add a new worktree in ~/.worktrees/<repo>/<name>'
                 'list:List worktrees'
                 'remove:Remove a worktree'
@@ -497,6 +532,9 @@ _work() {
             ;;
         args)
             case $words[1] in
+                on)
+                    _arguments '1:worktree:_work_all_worktree_names'
+                    ;;
                 add)
                     _arguments \
                         '(-b --branch)'{-b,--branch}'[Create and checkout a new branch]:branch name:' \
@@ -558,11 +596,16 @@ function __work_worktree_names
     command work list-names 2>/dev/null
 end
 
-set -l __work_cmds add list remove cd lock unlock move repair prune setup init completions
+function __work_all_worktree_names
+    command work list-all-names 2>/dev/null
+end
+
+set -l __work_cmds on add list remove cd lock unlock move repair prune setup init completions
 
 complete -c work -f
 
 # Subcommands
+complete -c work -n "not __fish_seen_subcommand_from $__work_cmds" -a on          -d 'Switch to a worktree, creating it if it does not exist'
 complete -c work -n "not __fish_seen_subcommand_from $__work_cmds" -a add         -d 'Add a new worktree'
 complete -c work -n "not __fish_seen_subcommand_from $__work_cmds" -a list        -d 'List worktrees'
 complete -c work -n "not __fish_seen_subcommand_from $__work_cmds" -a remove      -d 'Remove a worktree'
@@ -575,6 +618,9 @@ complete -c work -n "not __fish_seen_subcommand_from $__work_cmds" -a prune     
 complete -c work -n "not __fish_seen_subcommand_from $__work_cmds" -a setup       -d 'Install completions to standard shell locations'
 complete -c work -n "not __fish_seen_subcommand_from $__work_cmds" -a init        -d 'Print shell cd-wrapper function'
 complete -c work -n "not __fish_seen_subcommand_from $__work_cmds" -a completions -d 'Print shell completion script'
+
+# on — all worktrees across all repos
+complete -c work -n "__fish_seen_subcommand_from on" -a "(__work_all_worktree_names)"
 
 # add
 complete -c work -n "__fish_seen_subcommand_from add" -s b -l branch       -d 'Create and checkout a new branch' -r
@@ -617,7 +663,7 @@ _work() {
     local cur prev words cword
     _init_completion || return
 
-    local all_commands="add list remove cd lock unlock move repair prune setup init completions"
+    local all_commands="on add list remove cd lock unlock move repair prune setup init completions"
 
     if [[ $cword -eq 1 ]]; then
         COMPREPLY=($(compgen -W "$all_commands" -- "$cur"))
@@ -627,6 +673,11 @@ _work() {
     local subcmd="${words[1]}"
 
     case "$subcmd" in
+        on)
+            local names
+            names=$(command work list-all-names 2>/dev/null)
+            COMPREPLY=($(compgen -W "$names" -- "$cur"))
+            ;;
         remove|cd|lock|unlock|move)
             local names
             names=$(command work list-names 2>/dev/null)

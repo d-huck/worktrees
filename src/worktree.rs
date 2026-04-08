@@ -217,6 +217,14 @@ pub fn prune(dry_run: bool, verbose: bool, expire: Option<&str>) -> Result<()> {
     Ok(())
 }
 
+pub fn on(name: &str) -> Result<PathBuf> {
+    let path = repo_worktrees_dir()?.join(name);
+    if !path.exists() {
+        add(name, None, None, false, false)?;
+    }
+    Ok(path)
+}
+
 pub fn list_names() -> Result<()> {
     let dir = match repo_worktrees_dir() {
         Ok(d) => d,
@@ -236,6 +244,39 @@ pub fn list_names() -> Result<()> {
 
     entries.sort();
     for name in entries {
+        println!("{}", name);
+    }
+
+    Ok(())
+}
+
+pub fn list_all_names() -> Result<()> {
+    let base = worktrees_base();
+    if !base.exists() {
+        return Ok(());
+    }
+
+    let mut names = std::collections::HashSet::new();
+
+    for repo_entry in std::fs::read_dir(&base)
+        .with_context(|| format!("Failed to read {}", base.display()))?
+    {
+        let repo_entry = repo_entry?;
+        if !repo_entry.file_type()?.is_dir() {
+            continue;
+        }
+        if let Ok(wt_entries) = std::fs::read_dir(repo_entry.path()) {
+            for wt_entry in wt_entries.flatten() {
+                if wt_entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                    names.insert(wt_entry.file_name().to_string_lossy().to_string());
+                }
+            }
+        }
+    }
+
+    let mut names: Vec<_> = names.into_iter().collect();
+    names.sort();
+    for name in names {
         println!("{}", name);
     }
 
