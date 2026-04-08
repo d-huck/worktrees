@@ -328,7 +328,12 @@ _work() {
     esac
 }
 
-_work "$@"
+# Support both fpath autoload (#compdef) and direct sourcing via source <(...)
+if [[ "${funcstack[1]}" == "_work" ]]; then
+    _work "$@"
+else
+    compdef _work work
+fi
 "#;
 
 const FISH_COMPLETION: &str = r#"# work — git worktree manager (fish completions)
